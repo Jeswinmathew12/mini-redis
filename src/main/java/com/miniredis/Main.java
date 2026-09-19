@@ -1,6 +1,7 @@
 package com.miniredis;
 
 import com.miniredis.server.Server;
+import com.miniredis.store.ExpirationSweeper;
 import com.miniredis.store.InMemoryStore;
 
 import java.io.IOException;
@@ -20,8 +21,17 @@ public class Main {
             }
         }
 
-        Server server = new Server(port, new InMemoryStore());
+        InMemoryStore store = new InMemoryStore();
+        ExpirationSweeper sweeper = new ExpirationSweeper(store);
+        sweeper.start();
+
+        Server server = new Server(port, store);
         server.start();
         System.out.println("mini-redis listening on port " + server.getPort());
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            server.stop();
+            sweeper.close();
+        }));
     }
 }

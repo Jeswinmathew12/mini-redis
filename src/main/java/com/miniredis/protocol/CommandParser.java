@@ -29,6 +29,7 @@ public final class CommandParser {
         return switch (type) {
             case SET -> parseSet(rest);
             case GET, DEL -> parseSingleKey(type, rest);
+            case EXPIRE -> parseExpire(rest);
         };
     }
 
@@ -45,6 +46,22 @@ public final class CommandParser {
             throw wrongArgs(type);
         }
         return new Command(type, List.of(rest));
+    }
+
+    private Command parseExpire(String rest) throws InvalidCommandException {
+        String[] keyAndSeconds = splitFirstToken(rest);
+        String key = keyAndSeconds[0];
+        String seconds = keyAndSeconds[1];
+        if (key.isEmpty() || seconds.isEmpty() || containsWhitespace(seconds)) {
+            throw wrongArgs(CommandType.EXPIRE);
+        }
+        // Reject here so the executor can trust the argument is numeric.
+        try {
+            Long.parseLong(seconds);
+        } catch (NumberFormatException e) {
+            throw new InvalidCommandException("value is not an integer or out of range");
+        }
+        return new Command(CommandType.EXPIRE, List.of(key, seconds));
     }
 
     /** Splits at the first whitespace; the remainder is stripped and may be empty. */

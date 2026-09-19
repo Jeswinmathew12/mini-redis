@@ -29,6 +29,8 @@ public class CommandExecutor {
             }
             case GET -> store.get(args.get(0)).orElse(NIL);
             case DEL -> store.del(args.get(0)) ? OK : NIL;
+            // The parser has already validated that args.get(1) is numeric.
+            case EXPIRE -> store.expire(args.get(0), Long.parseLong(args.get(1))) ? OK : NIL;
         };
     }
 }

@@ -59,6 +59,32 @@ class CommandParserTest {
     }
 
     @Test
+    void parsesExpire() throws Exception {
+        assertEquals(new Command(CommandType.EXPIRE, List.of("session123", "10")),
+                parser.parse("EXPIRE session123 10"));
+    }
+
+    @Test
+    void parsesExpireWithNegativeSeconds() throws Exception {
+        assertEquals(new Command(CommandType.EXPIRE, List.of("k", "-1")),
+                parser.parse("EXPIRE k -1"));
+    }
+
+    @Test
+    void rejectsExpireWithNonNumericSeconds() {
+        InvalidCommandException e =
+                assertThrows(InvalidCommandException.class, () -> parser.parse("EXPIRE k soon"));
+        assertEquals("value is not an integer or out of range", e.getMessage());
+    }
+
+    @Test
+    void rejectsExpireWithWrongArgumentCounts() {
+        assertThrows(InvalidCommandException.class, () -> parser.parse("EXPIRE"));
+        assertThrows(InvalidCommandException.class, () -> parser.parse("EXPIRE k"));
+        assertThrows(InvalidCommandException.class, () -> parser.parse("EXPIRE k 10 20"));
+    }
+
+    @Test
     void rejectsWrongArgumentCounts() {
         assertThrows(InvalidCommandException.class, () -> parser.parse("SET"));
         assertThrows(InvalidCommandException.class, () -> parser.parse("SET onlykey"));

@@ -78,6 +78,28 @@ class ServerIntegrationTest {
     }
 
     @Test
+    void expireOverTheWireHidesTheKeyOnceItElapses() throws Exception {
+        try (TestClient client = new TestClient()) {
+            assertEquals("OK", client.send("SET session123 Jeswin"));
+            assertEquals("OK", client.send("EXPIRE session123 1"));
+            assertEquals("Jeswin", client.send("GET session123"));
+
+            Thread.sleep(1_200);
+
+            assertEquals("(nil)", client.send("GET session123"));
+        }
+    }
+
+    @Test
+    void expireReportsNilForUnknownKeyAndRejectsBadSeconds() throws IOException {
+        try (TestClient client = new TestClient()) {
+            assertEquals("(nil)", client.send("EXPIRE ghost 10"));
+            assertEquals("ERR value is not an integer or out of range",
+                    client.send("EXPIRE k soon"));
+        }
+    }
+
+    @Test
     void clientsShareTheSameStore() throws IOException {
         try (TestClient first = new TestClient(); TestClient second = new TestClient()) {
             assertEquals("OK", first.send("SET shared yes"));

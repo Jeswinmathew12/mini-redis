@@ -3,5 +3,6 @@ package com.miniredis.protocol;
 public enum CommandType {
     SET,
     GET,
-    DEL
+    DEL,
+    EXPIRE
 }

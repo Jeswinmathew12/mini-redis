@@ -46,4 +46,25 @@ class CommandExecutorTest {
     void delMissingKeyReturnsNil() {
         assertEquals("(nil)", run(CommandType.DEL, "missing"));
     }
+
+    @Test
+    void expireOnLiveKeyReturnsOk() {
+        run(CommandType.SET, "session123", "Jeswin");
+
+        assertEquals("OK", run(CommandType.EXPIRE, "session123", "10"));
+        assertEquals("Jeswin", run(CommandType.GET, "session123"));
+    }
+
+    @Test
+    void expireOnMissingKeyReturnsNil() {
+        assertEquals("(nil)", run(CommandType.EXPIRE, "missing", "10"));
+    }
+
+    @Test
+    void expireWithZeroSecondsDeletesImmediately() {
+        run(CommandType.SET, "k", "v");
+
+        assertEquals("OK", run(CommandType.EXPIRE, "k", "0"));
+        assertEquals("(nil)", run(CommandType.GET, "k"));
+    }
 }
