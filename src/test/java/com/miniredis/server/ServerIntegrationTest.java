@@ -14,6 +14,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 /** Starts a real server on a free port and talks to it over real sockets. */
 @Timeout(10)
@@ -130,6 +131,49 @@ class ServerIntegrationTest {
 
         for (int i = 0; i < clients; i++) {
             assertEquals("value" + i, results[i]);
+        }
+    }
+
+    @Test
+    void concurrentClientsDoingManyOperationsNeverSeeEachOthersPrivateKeys() throws Exception {
+        int clients = 10;
+        int opsPerClient = 200;
+        Thread[] threads = new Thread[clients];
+        String[] failures = new String[clients];
+
+        for (int i = 0; i < clients; i++) {
+            final int id = i;
+            threads[i] = new Thread(() -> {
+                try (TestClient client = new TestClient()) {
+                    for (int op = 0; op < opsPerClient; op++) {
+                        String key = "c" + id + "-" + op;
+                        client.send("SET " + key + " " + op);
+                        client.send("SET shared from-" + id);
+                        String mine = client.send("GET " + key);
+                        String shared = client.send("GET shared");
+                        client.send("DEL " + key);
+
+                        if (!String.valueOf(op).equals(mine)) {
+                            failures[id] = "private key wrong: " + mine;
+                            return;
+                        }
+                        if (!shared.startsWith("from-")) {
+                            failures[id] = "shared key corrupted: " + shared;
+                            return;
+                        }
+                    }
+                } catch (IOException e) {
+                    failures[id] = "IO error: " + e.getMessage();
+                }
+            });
+            threads[i].start();
+        }
+        for (Thread t : threads) {
+            t.join();
+        }
+
+        for (int i = 0; i < clients; i++) {
+            assertNull(failures[i], "client " + i);
         }
     }
 }
