@@ -219,6 +219,46 @@ class ServerLifecycleTest {
         }
     }
 
+    // Connection bursts
+
+    @Test
+    void aBurstOfSimultaneousConnectionsIsNotRefused() throws Exception {
+        Server server = startServer();
+        int clients = 120;
+        java.util.concurrent.CyclicBarrier gate = new java.util.concurrent.CyclicBarrier(clients);
+        List<Throwable> failures = new CopyOnWriteArrayList<>();
+        List<Thread> threads = new ArrayList<>();
+        try {
+            for (int i = 0; i < clients; i++) {
+                Thread t = new Thread(() -> {
+                    try {
+                        gate.await();
+                        try (Socket socket = new Socket()) {
+                            socket.connect(new InetSocketAddress("127.0.0.1", server.getPort()), 10_000);
+                            socket.setSoTimeout(10_000);
+                            socket.getOutputStream().write("DBSIZE\r\n".getBytes(StandardCharsets.UTF_8));
+                            socket.getOutputStream().flush();
+                            String reply = new BufferedReader(new InputStreamReader(
+                                    socket.getInputStream(), StandardCharsets.UTF_8)).readLine();
+                            assertEquals("0", reply);
+                        }
+                    } catch (Throwable e) {
+                        failures.add(e);
+                    }
+                });
+                threads.add(t);
+                t.start();
+            }
+            for (Thread t : threads) {
+                t.join();
+            }
+        } finally {
+            server.stop();
+        }
+        assertTrue(failures.isEmpty(), failures.size() + " of " + clients
+                + " simultaneous clients failed; first: " + (failures.isEmpty() ? "" : failures.get(0)));
+    }
+
     // Connection limit
 
     @Test

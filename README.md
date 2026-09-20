@@ -71,7 +71,10 @@ execution are unit-testable without opening a port.
   atomic with respect to every other. "Is it expired? then remove it" and
   "find the least recently used key, then evict it" can never race with a
   concurrent write. The cost is that reads don't run in parallel, which is
-  unavoidable here anyway: a read must reorder the recency list.
+  unavoidable here anyway: a read must reorder the recency list. The lock is *fair*
+  (first come, first served): load-testing showed a non-fair lock is about
+  25-30% faster but lets some clients wait far longer than others. See
+  Performance.
 - **Exact LRU in O(1).** A doubly linked list with sentinel head and tail
   orders keys by recency. Each node carries its own links, so touching or
   removing a known node never searches. A `GET` hit or a `SET` moves the key
@@ -196,6 +199,54 @@ Logs go to stderr, so `docker logs` shows them. The health check assumes port
    over TCP, and checks that `docker stop` finishes promptly.
 
 The smoke test can be run locally too: `docker build -t mini-redis . && bash scripts/docker-smoke.sh`.
+
+## Performance
+
+Measured with `bash scripts/benchmark.sh`: a closed-loop load generator (each
+client sends one command and waits for the reply) drives the packaged jar over
+loopback. Client and server ran on the same laptop (Windows 11, 14 logical
+CPUs, JDK 21), 32-byte values, uniform random keys, 3 s warmup then 10 s
+measured. One run per row.
+
+| Scenario | ops/s | p50 | p99 | worst |
+|---|---:|---:|---:|---:|
+| 1 client, 80% GET / 20% SET | 23,900 | 40 us | 120 us | 2.6 ms |
+| 10 clients | 51,100 | 200 us | 310 us | 5.0 ms |
+| 50 clients | 79,900 | 620 us | 785 us | 16.5 ms |
+| 200 clients | 53,300 | 3.6 ms | 6.5 ms | 10.6 ms |
+| 50 clients, 100% GET | 56,900 | 845 us | 1.5 ms | 9.2 ms |
+| 50 clients, 50% GET | 60,800 | 815 us | 1.0 ms | 4.1 ms |
+| 50 clients, LRU, everything fits | 53,500 | 880 us | 2.2 ms | 15.2 ms |
+| 50 clients, LRU, 10% of keys fit | 54,300 | 895 us | 1.4 ms | 26.3 ms |
+
+Repeating the 50-client row four more times gave 57,000-60,000 ops/s and p99
+of 1.0-1.6 ms; the 79,900 above was the fastest of five runs, so read that row
+as roughly 58,000. Run-to-run variance on this machine is large.
+
+What it shows:
+
+- **Throughput plateaus at roughly 55,000-60,000 ops/s** from about 10 clients
+  up. I did not determine whether the limit is the store's single lock, the
+  thread-per-client model, or the load generator sharing the machine.
+- **LRU costs nothing measurable.** 53,500 ops/s with no eviction against
+  54,300 with constant eviction (137,000 evictions in the run). The hit rate
+  with room for 10% of the keys was 9.9%, matching the 10% expected from
+  uniform random access.
+- **The lock is fair, deliberately.** Interleaved runs at 50 clients: a
+  non-fair lock gave 52,000-54,000 ops/s with p99 of 12-13 ms and worst cases
+  from tens of milliseconds to over 3 seconds, because a thread that just
+  released the lock can win it again ahead of waiting threads. A fair lock gave
+  35,000-41,000 ops/s in that comparison (25-30% less) but p99 of about 2 ms
+  and no wait over about 60 ms. Predictable latency was the better trade for a
+  cache. Garbage collection was ruled out: the longest pause in a run was 3.4 ms.
+- **The load test found a real bug:** the listen backlog was hard-coded to 50,
+  so a burst of 200 clients connecting at once lost 23 of them. It is now 511
+  (the OS may cap it lower), with a regression test.
+
+Caveats: closed-loop clients slow down when the server does, so latency here is
+a best-case view; client and server compete for CPU; values are tiny; keys are
+uniform, not skewed like real traffic. These numbers are not comparable to
+Redis, which is heavily optimized and single-threaded on an event loop.
 
 ## Tests
 

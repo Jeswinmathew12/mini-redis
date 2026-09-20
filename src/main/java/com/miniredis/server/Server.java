@@ -28,6 +28,14 @@ public class Server {
     /** Most simultaneous connections; extra clients are told so and disconnected. */
     public static final int DEFAULT_MAX_CLIENTS = 1000;
 
+    /**
+     * Connections the OS may queue while the accept loop is busy. Too small and
+     * a burst of clients connecting at once is refused; a load test with 200
+     * simultaneous clients lost 23 of them at the old value of 50. The OS may
+     * cap this. 511 is Redis's default.
+     */
+    private static final int LISTEN_BACKLOG = 511;
+
     private static final System.Logger LOG = System.getLogger(Server.class.getName());
     private static final long SHUTDOWN_WAIT_SECONDS = 3;
     private static final long ACCEPT_ERROR_BACKOFF_MILLIS = 50;
@@ -94,7 +102,7 @@ public class Server {
         if (serverSocket != null) {
             throw new IllegalStateException("server already started");
         }
-        ServerSocket socket = new ServerSocket(requestedPort, 50, options.bindAddress());
+        ServerSocket socket = new ServerSocket(requestedPort, LISTEN_BACKLOG, options.bindAddress());
         serverSocket = socket;
         boundPort = socket.getLocalPort();
         Thread thread = new Thread(this::acceptLoop, "accept-loop");
