@@ -31,6 +31,16 @@ public class CommandExecutor {
             case DEL -> store.del(args.get(0)) ? OK : NIL;
             // The parser has already validated that args.get(1) is numeric.
             case EXPIRE -> store.expire(args.get(0), Long.parseLong(args.get(1))) ? OK : NIL;
+            case DBSIZE -> String.valueOf(store.stats().keys());
+            case INFO -> info(store.stats());
         };
+    }
+
+    /** One line, so it fits the line-based protocol. {@code max_keys=0} means unlimited. */
+    private static String info(Store.Stats stats) {
+        return "keys=" + stats.keys()
+                + " max_keys=" + stats.maxKeys()
+                + " evictions=" + stats.evictions()
+                + " expirations=" + stats.expirations();
     }
 }

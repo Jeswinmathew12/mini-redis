@@ -93,4 +93,19 @@ class CommandParserTest {
         assertThrows(InvalidCommandException.class, () -> parser.parse("DEL"));
         assertThrows(InvalidCommandException.class, () -> parser.parse("DEL a b"));
     }
+
+    @Test
+    void parsesDbsizeAndInfoWithNoArguments() throws Exception {
+        assertEquals(new Command(CommandType.DBSIZE, List.of()), parser.parse("DBSIZE"));
+        assertEquals(new Command(CommandType.INFO, List.of()), parser.parse("info"));
+        assertEquals(new Command(CommandType.DBSIZE, List.of()), parser.parse("  dbsize  "));
+    }
+
+    @Test
+    void rejectsDbsizeAndInfoWithArguments() {
+        InvalidCommandException e =
+                assertThrows(InvalidCommandException.class, () -> parser.parse("DBSIZE now"));
+        assertEquals("wrong number of arguments for 'DBSIZE'", e.getMessage());
+        assertThrows(InvalidCommandException.class, () -> parser.parse("INFO all"));
+    }
 }

@@ -10,10 +10,11 @@ import java.util.Optional;
  * Keys may carry a time-to-live. An expired key behaves exactly as if it
  * were absent, whether or not it has physically been removed yet.
  *
- * <h2>Capacity and LRU eviction (contract; not implemented yet)</h2>
+ * <h2>Capacity and LRU eviction</h2>
  *
- * A store may be configured with a maximum number of keys. Without one it is
- * unbounded. With one, these rules apply:
+ * A store may be configured with a maximum number of keys (see
+ * {@link InMemoryStore}). Without one it is unbounded. With one, these rules
+ * apply:
  *
  * <ul>
  *   <li><b>What counts as a use.</b> A {@code get} that finds a live key and
@@ -80,4 +81,20 @@ public interface Store {
      * @throws NullPointerException if key is null
      */
     boolean expire(String key, long seconds);
+
+    /**
+     * A consistent snapshot of the store's size and counters, all read at the
+     * same instant.
+     *
+     * @param keys        keys currently held; includes keys that have expired
+     *                    but not yet been reclaimed
+     * @param maxKeys     the capacity, or 0 if unlimited
+     * @param evictions   keys removed to make room, since the store was created
+     * @param expirations keys removed because their TTL elapsed, since the
+     *                    store was created
+     */
+    record Stats(int keys, int maxKeys, long evictions, long expirations) {
+    }
+
+    Stats stats();
 }

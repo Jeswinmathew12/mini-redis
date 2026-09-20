@@ -30,7 +30,15 @@ public final class CommandParser {
             case SET -> parseSet(rest);
             case GET, DEL -> parseSingleKey(type, rest);
             case EXPIRE -> parseExpire(rest);
+            case DBSIZE, INFO -> parseNoArguments(type, rest);
         };
+    }
+
+    private Command parseNoArguments(CommandType type, String rest) throws InvalidCommandException {
+        if (!rest.isEmpty()) {
+            throw wrongArgs(type);
+        }
+        return new Command(type, List.of());
     }
 
     private Command parseSet(String rest) throws InvalidCommandException {

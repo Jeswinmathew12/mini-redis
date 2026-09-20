@@ -4,5 +4,7 @@ public enum CommandType {
     SET,
     GET,
     DEL,
-    EXPIRE
+    EXPIRE,
+    DBSIZE,
+    INFO
 }

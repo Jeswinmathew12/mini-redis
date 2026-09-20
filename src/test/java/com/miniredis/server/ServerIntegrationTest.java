@@ -149,6 +149,30 @@ class ServerIntegrationTest {
     }
 
     @Test
+    void leastRecentlyUsedKeyIsEvictedOverTheWire() throws Exception {
+        server.stop();
+        server = new Server(0, new InMemoryStore(3));
+        server.start();
+
+        try (TestClient client = new TestClient()) {
+            client.send("SET a 1");
+            client.send("SET b 2");
+            client.send("SET c 3");
+            assertEquals("1", client.send("GET a"));   // a is now most recently used
+
+            client.send("SET d 4");                    // over capacity: b is the LRU
+
+            assertEquals("(nil)", client.send("GET b"));
+            assertEquals("1", client.send("GET a"));
+            assertEquals("3", client.send("GET c"));
+            assertEquals("4", client.send("GET d"));
+
+            assertEquals("3", client.send("DBSIZE"));
+            assertEquals("keys=3 max_keys=3 evictions=1 expirations=0", client.send("INFO"));
+        }
+    }
+
+    @Test
     void unterminatedFloodIsCutOffWithoutBufferingIt() throws Exception {
         server.stop();
         server = new Server(0, new InMemoryStore(), 1024);
