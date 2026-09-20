@@ -1,5 +1,7 @@
 # mini-redis
 
+[![CI](https://github.com/Jeswinmathew12/mini-redis/actions/workflows/ci.yml/badge.svg)](https://github.com/Jeswinmathew12/mini-redis/actions/workflows/ci.yml)
+
 A from-scratch, educational in-memory key-value store in Java, inspired by
 Redis. Built incrementally as a backend/systems portfolio project — no
 frameworks, just the JDK, Maven, and JUnit 5.
@@ -181,6 +183,20 @@ host's loopback (`-p 127.0.0.1:6380:6380`) unless you mean to expose it.
 Logs go to stderr, so `docker logs` shows them. The health check assumes port
 6380; if you change the port, change it in the `Dockerfile` too.
 
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to
+`main` and every pull request:
+
+1. **Build and test** - `mvn verify` on JDK 21 (the full test suite, then the
+   jar). Test reports are uploaded as an artifact if it fails.
+2. **Docker image** - builds the image, starts it, and runs
+   [`scripts/docker-smoke.sh`](scripts/docker-smoke.sh): waits for the health
+   check, confirms it runs as non-root, checks SET/GET/LRU eviction/`INFO`
+   over TCP, and checks that `docker stop` finishes promptly.
+
+The smoke test can be run locally too: `docker build -t mini-redis . && bash scripts/docker-smoke.sh`.
+
 ## Tests
 
 ```bash
@@ -207,9 +223,7 @@ src/test/java/com/miniredis/
   protocol/ server/ store/
 ```
 
-## Not yet implemented
+## Out of scope
 
-- GitHub Actions CI
-
-Persistence is deliberately out of scope: this is a cache-style store, like
-Redis with no snapshotting configured.
+Persistence / snapshotting is deliberately not implemented: this is a
+cache-style store, like Redis with no snapshotting configured.
