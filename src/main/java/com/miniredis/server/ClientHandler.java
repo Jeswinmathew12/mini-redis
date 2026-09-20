@@ -16,6 +16,8 @@ import java.nio.charset.StandardCharsets;
  */
 class ClientHandler implements Runnable {
 
+    private static final System.Logger LOG = System.getLogger(ClientHandler.class.getName());
+
     private final Socket socket;
     private final CommandParser parser;
     private final CommandExecutor executor;
@@ -53,6 +55,7 @@ class ClientHandler implements Runnable {
         } catch (IOException e) {
             // Client vanished mid-conversation or the server is shutting down.
             // Either way this client is done; nothing else is affected.
+            LOG.log(System.Logger.Level.DEBUG, "client connection ended: " + e.getMessage());
         }
     }
 
@@ -62,6 +65,11 @@ class ClientHandler implements Runnable {
             return executor.execute(command);
         } catch (InvalidCommandException e) {
             return "ERR " + e.getMessage();
+        } catch (RuntimeException e) {
+            // A bug on our side must not cost the client its connection, and its
+            // details must not leak to the client. Log it, report it, carry on.
+            LOG.log(System.Logger.Level.ERROR, "unexpected error handling a command", e);
+            return "ERR internal error";
         }
     }
 

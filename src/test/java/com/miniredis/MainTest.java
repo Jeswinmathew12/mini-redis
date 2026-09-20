@@ -10,22 +10,22 @@ class MainTest {
 
     @Test
     void noArgumentsMeansDefaultPortAndNoLimit() {
-        assertEquals(new Main.Options(6380, 0), Main.parseArgs(new String[] {}));
+        assertEquals(new Main.Options(6380, 0, "127.0.0.1"), Main.parseArgs(new String[] {}));
     }
 
     @Test
     void firstArgumentIsThePort() {
-        assertEquals(new Main.Options(7000, 0), Main.parseArgs(new String[] {"7000"}));
+        assertEquals(new Main.Options(7000, 0, "127.0.0.1"), Main.parseArgs(new String[] {"7000"}));
     }
 
     @Test
     void secondArgumentIsTheKeyLimit() {
-        assertEquals(new Main.Options(7000, 500), Main.parseArgs(new String[] {"7000", "500"}));
+        assertEquals(new Main.Options(7000, 500, "127.0.0.1"), Main.parseArgs(new String[] {"7000", "500"}));
     }
 
     @Test
     void zeroKeyLimitMeansUnlimitedAndPortZeroPicksAFreePort() {
-        assertEquals(new Main.Options(0, 0), Main.parseArgs(new String[] {"0", "0"}));
+        assertEquals(new Main.Options(0, 0, "127.0.0.1"), Main.parseArgs(new String[] {"0", "0"}));
     }
 
     @Test
@@ -52,8 +52,21 @@ class MainTest {
     }
 
     @Test
+    void thirdArgumentIsTheBindAddress() {
+        assertEquals(new Main.Options(6380, 0, "0.0.0.0"),
+                Main.parseArgs(new String[] {"6380", "0", "0.0.0.0"}));
+    }
+
+    @Test
+    void anUnresolvableBindAddressIsRejectedWithAClearMessage() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> Main.parseArgs(new String[] {"6380", "0", "no.such.host.invalid"}));
+        assertTrue(e.getMessage().contains("bind address"), e.getMessage());
+    }
+
+    @Test
     void tooManyArgumentsAreRejected() {
         assertThrows(IllegalArgumentException.class,
-                () -> Main.parseArgs(new String[] {"7000", "5", "extra"}));
+                () -> Main.parseArgs(new String[] {"7000", "5", "127.0.0.1", "extra"}));
     }
 }

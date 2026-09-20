@@ -93,9 +93,21 @@ execution are unit-testable without opening a port.
   scans live keys, however many there are. If a pass uses at least 25% of
   its budget it runs again immediately; otherwise it sleeps, so an idle
   server uses effectively no CPU.
-- **Input is bounded.** A command line may be at most 1 MiB (configurable on
-  `Server`). A longer line gets `ERR line too long` and the connection is
-  closed, so one client cannot exhaust the server's memory.
+- **Input and connections are bounded.** A command line may be at most 1 MiB;
+  a longer line gets `ERR line too long` and the connection is closed, so one
+  client cannot exhaust the server's memory. At most 1000 clients connect at
+  once; extras get `ERR max clients reached`. TCP keepalive lets the OS
+  reclaim connections whose peer vanished.
+- **Shutdown is orderly.** `stop()` closes the listening socket first, then
+  every client, then waits for the accept loop and handler threads. A client
+  accepted in the instant between those steps is closed rather than leaked.
+  The JVM shutdown hook calls it, so `docker stop` (SIGTERM) shuts down
+  cleanly.
+- **Failures are contained and logged.** An unexpected error while running a
+  command replies `ERR internal error` and keeps the connection; the sweeper
+  logs a failure once and keeps retrying; nothing is silently swallowed.
+- **The sweeper cannot starve clients.** A mass expiry is reclaimed in short
+  bursts (at most 25 ms back to back), then the thread sleeps.
 
 ## Requirements
 
@@ -106,18 +118,25 @@ execution are unit-testable without opening a port.
 
 ```bash
 mvn test                                        # run the test suite
-mvn package -DskipTests                         # build
-java -cp target/classes com.miniredis.Main      # listen on 6380
-java -cp target/classes com.miniredis.Main 7000 # or a port of your choice
-java -cp target/classes com.miniredis.Main 6380 1000  # port, then max keys (LRU)
+mvn package                                     # test, then build target/mini-redis.jar
+java -jar target/mini-redis.jar                 # listen on 127.0.0.1:6380
+java -jar target/mini-redis.jar 7000            # or a port of your choice
+java -jar target/mini-redis.jar 6380 1000       # port, then max keys (LRU)
+java -jar target/mini-redis.jar 6380 1000 0.0.0.0   # port, max keys, bind address
 ```
 
-With a key limit, inserting a new key into a full store evicts the least
-recently used key (expired keys are reclaimed first). A limit of `0`, or
-leaving it out, means no limit. Use `INFO` to watch evictions and expirations.
+Arguments are `[port [maxKeys [bindAddress]]]`:
+
+- **maxKeys** - with a limit, inserting a new key into a full store evicts
+  the least recently used key (expired keys are reclaimed first). `0`, or
+  leaving it out, means no limit. Use `INFO` to watch evictions and expirations.
+- **bindAddress** - defaults to `127.0.0.1`, so the server is reachable only
+  from this machine (it has no authentication). Pass `0.0.0.0` to accept
+  remote clients. **Inside a container you must pass `0.0.0.0`**, otherwise a
+  published port cannot reach the server.
 
 ```
-$ java -cp target/classes com.miniredis.Main 6380 3
+$ java -jar target/mini-redis.jar 6380 3
 SET a 1 / SET b 2 / SET c 3      (store is full)
 GET a                            (a is now the most recently used)
 SET d 4                          (evicts b, the least recently used)
@@ -172,6 +191,8 @@ src/test/java/com/miniredis/
 
 ## Not yet implemented
 
-- Persistence / snapshotting
 - Docker
 - GitHub Actions CI
+
+Persistence is deliberately out of scope: this is a cache-style store, like
+Redis with no snapshotting configured.
