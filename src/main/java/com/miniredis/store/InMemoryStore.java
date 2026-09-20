@@ -1,48 +1,65 @@
 package com.miniredis.store;
 
 import java.time.Clock;
-import java.util.Iterator;
-import java.util.Map;
+import java.util.HashMap;
+import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.TreeSet;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * In-memory implementation of {@link Store} backed by a hash map.
+ * In-memory implementation of {@link Store}.
  *
- * <p>Value and expiry deadline are held together in one immutable
- * {@link Entry}, so a single map write replaces both atomically. Keeping
- * them in two separate maps would make SET a two-step update that a reader
- * could observe half-finished.
+ * <p><b>Concurrency: one lock guards everything.</b> The key map and the
+ * expiry index are plain, non-thread-safe collections that are only touched
+ * while holding {@link #lock}. Each public operation is therefore atomic with
+ * respect to every other, including the background sweeper, so "check whether
+ * it expired, then remove it" can never race with a concurrent write. The
+ * price is that reads no longer run in parallel; every operation is O(1) or
+ * O(log n) and network I/O dominates, so the lock is short-held and cheap.
+ * This is also the shape LRU eviction needs, since a read must reorder shared
+ * recency state.
  *
- * <p>Expired keys are reclaimed two ways: lazily, when an operation happens
- * to touch one, and actively, by {@link ExpirationSweeper} calling
- * {@link #sweepExpired}. Lazy alone would leak keys nobody ever reads.
+ * <p><b>Expiry.</b> Keys with a TTL are also listed in a deadline-ordered
+ * index. Expired keys are reclaimed two ways: lazily, when an operation
+ * touches one, and actively, by {@link ExpirationSweeper} calling
+ * {@link #sweepExpired}, which pops from the front of that index. The sweeper
+ * therefore does work proportional to what expired and never scans live keys.
  */
 public class InMemoryStore implements Store {
 
-    /** Deadline for a key with no TTL; always compares as "not yet reached". */
+    /** Deadline for a key with no TTL; such keys are not in the expiry index. */
     private static final long NO_EXPIRY = Long.MAX_VALUE;
 
-    /**
-     * A value plus its absolute expiry deadline. Immutable, so publishing a
-     * reference publishes a consistent pair.
-     */
-    private record Entry(String value, long expiresAtMillis) {
+    /** A stored key. Mutated only while holding the store lock. */
+    private static final class Node {
+        final String key;
+        String value;
+        long expiresAtMillis = NO_EXPIRY;
+
+        Node(String key, String value) {
+            this.key = key;
+            this.value = value;
+        }
 
         boolean isExpiredAt(long nowMillis) {
             return nowMillis >= expiresAtMillis;
         }
     }
 
-    private final ConcurrentHashMap<String, Entry> data = new ConcurrentHashMap<>();
+    /** Entry in the expiry index: ordered by deadline, then key, so it is unique per key. */
+    private record ExpiryKey(long deadlineMillis, String key) implements Comparable<ExpiryKey> {
+        @Override
+        public int compareTo(ExpiryKey other) {
+            int byDeadline = Long.compare(deadlineMillis, other.deadlineMillis);
+            return byDeadline != 0 ? byDeadline : key.compareTo(other.key);
+        }
+    }
+
+    private final ReentrantLock lock = new ReentrantLock();
+    private final HashMap<String, Node> data = new HashMap<>();
+    private final TreeSet<ExpiryKey> expiryIndex = new TreeSet<>();
     private final Clock clock;
-
-    /** Guards {@link #sweepCursor} only; deliberately not taken by get/set/del. */
-    private final Object sweepLock = new Object();
-
-    /** Round-robin position, so successive sweeps cover different keys. */
-    private Iterator<Map.Entry<String, Entry>> sweepCursor;
 
     public InMemoryStore() {
         this(Clock.systemUTC());
@@ -50,141 +67,170 @@ public class InMemoryStore implements Store {
 
     /** Test seam: lets tests move time without sleeping. */
     public InMemoryStore(Clock clock) {
-        this.clock = requireNonNull(clock, "clock");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     @Override
     public void set(String key, String value) {
-        requireNonNull(key, "key");
-        requireNonNull(value, "value");
-        // Writing a fresh Entry clears any previous TTL in the same atomic write.
-        data.put(key, new Entry(value, NO_EXPIRY));
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(value, "value");
+        lock.lock();
+        try {
+            Node node = data.get(key);
+            if (node == null) {
+                node = new Node(key, value);
+                data.put(key, node);
+            } else {
+                node.value = value;
+            }
+            // A plain SET always produces a key that lives forever.
+            setDeadline(node, NO_EXPIRY);
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override
     public Optional<String> get(String key) {
-        requireNonNull(key, "key");
-        Entry entry = data.get(key);
-        if (entry == null) {
-            return Optional.empty();
+        Objects.requireNonNull(key, "key");
+        lock.lock();
+        try {
+            Node node = liveNode(key, clock.millis());
+            return node == null ? Optional.empty() : Optional.of(node.value);
+        } finally {
+            lock.unlock();
         }
-        long now = clock.millis();
-        if (entry.isExpiredAt(now)) {
-            reclaimIfExpired(key, now);
-            return Optional.empty();
-        }
-        return Optional.of(entry.value());
     }
 
     @Override
     public boolean del(String key) {
-        requireNonNull(key, "key");
-        Entry removed = data.remove(key);
-        // An expired entry was already logically absent, so report false.
-        return removed != null && !removed.isExpiredAt(clock.millis());
+        Objects.requireNonNull(key, "key");
+        lock.lock();
+        try {
+            Node node = data.get(key);
+            if (node == null) {
+                return false;
+            }
+            // An expired entry was already logically absent, so report false.
+            boolean wasLive = !node.isExpiredAt(clock.millis());
+            remove(node);
+            return wasLive;
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override
     public boolean exists(String key) {
-        requireNonNull(key, "key");
-        Entry entry = data.get(key);
-        if (entry == null) {
-            return false;
+        Objects.requireNonNull(key, "key");
+        lock.lock();
+        try {
+            return liveNode(key, clock.millis()) != null;
+        } finally {
+            lock.unlock();
         }
-        long now = clock.millis();
-        if (entry.isExpiredAt(now)) {
-            reclaimIfExpired(key, now);
-            return false;
-        }
-        return true;
     }
 
     @Override
     public boolean expire(String key, long seconds) {
-        requireNonNull(key, "key");
-        long now = clock.millis();
-
+        Objects.requireNonNull(key, "key");
         if (seconds <= 0) {
             return del(key);
         }
-
-        long deadline = deadlineFrom(now, seconds);
-        AtomicBoolean applied = new AtomicBoolean(false);
-
-        // computeIfPresent runs atomically for this key, so a concurrent SET
-        // cannot be lost between reading the old value and writing the new TTL.
-        data.computeIfPresent(key, (k, existing) -> {
-            if (existing.isExpiredAt(now)) {
-                return null; // already dead: drop it, and report no TTL applied
+        lock.lock();
+        try {
+            long now = clock.millis();
+            Node node = liveNode(key, now);
+            if (node == null) {
+                return false;
             }
-            applied.set(true);
-            return new Entry(existing.value(), deadline);
-        });
-
-        return applied.get();
+            setDeadline(node, deadlineFrom(now, seconds));
+            return true;
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
-     * Examines up to {@code budget} entries and removes those that have
-     * expired, resuming where the previous call stopped.
+     * Removes up to {@code budget} expired entries, earliest deadline first.
+     * The bound keeps each call short so the lock is never held for long.
      *
      * @return how many entries were removed
      */
     int sweepExpired(int budget) {
-        synchronized (sweepLock) {
+        lock.lock();
+        try {
             long now = clock.millis();
             int removed = 0;
-
-            for (int examined = 0; examined < budget; examined++) {
-                if (sweepCursor == null || !sweepCursor.hasNext()) {
-                    if (data.isEmpty()) {
-                        return removed;
-                    }
-                    // Weakly consistent iterator: safe to hold across writes.
-                    sweepCursor = data.entrySet().iterator();
-                    if (!sweepCursor.hasNext()) {
-                        return removed;
-                    }
+            while (removed < budget && !expiryIndex.isEmpty()) {
+                ExpiryKey next = expiryIndex.first();
+                if (next.deadlineMillis() > now) {
+                    break; // everything after this is later still
                 }
-
-                Map.Entry<String, Entry> candidate = sweepCursor.next();
-                if (candidate.getValue().isExpiredAt(now)
-                        && reclaimIfExpired(candidate.getKey(), now)) {
-                    removed++;
-                }
+                remove(data.get(next.key()));
+                removed++;
             }
             return removed;
+        } finally {
+            lock.unlock();
         }
     }
 
     /** Number of entries still held, expired-but-unswept ones included. */
     int physicalSize() {
-        return data.size();
+        lock.lock();
+        try {
+            return data.size();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Number of keys currently tracked for expiry; equals the number of keys with a TTL. */
+    int expiryIndexSize() {
+        lock.lock();
+        try {
+            return expiryIndex.size();
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
-     * Removes the key only if whatever it maps to <em>right now</em> is
-     * expired at {@code nowMillis}. The check runs atomically on the current
-     * entry, so a value another thread wrote after we last looked survives
-     * unless it is itself expired. This deliberately does not compare against
-     * the entry we saw earlier: that would depend on {@code Entry.equals}
-     * and break silently if {@code Entry} ever gains fields.
-     *
-     * <p>The clock is read by the caller, never inside the lambda, so the
-     * lambda cannot re-enter the map.
-     *
-     * @return true if an entry was removed
+     * Returns the key's node if it is live at {@code nowMillis}. An expired
+     * node is removed on the spot and null is returned. Caller holds the lock.
      */
-    private boolean reclaimIfExpired(String key, long nowMillis) {
-        boolean[] removed = new boolean[1];
-        data.computeIfPresent(key, (k, current) -> {
-            if (current.isExpiredAt(nowMillis)) {
-                removed[0] = true;
-                return null;
-            }
-            return current;
-        });
-        return removed[0];
+    private Node liveNode(String key, long nowMillis) {
+        Node node = data.get(key);
+        if (node == null) {
+            return null;
+        }
+        if (node.isExpiredAt(nowMillis)) {
+            remove(node);
+            return null;
+        }
+        return node;
+    }
+
+    /** Removes the node from the map and the expiry index. Caller holds the lock. */
+    private void remove(Node node) {
+        setDeadline(node, NO_EXPIRY);
+        data.remove(node.key);
+    }
+
+    /**
+     * Changes a node's deadline, keeping the expiry index in step. The old
+     * index entry is removed eagerly, so the index holds exactly one entry per
+     * key that has a TTL and never accumulates stale ones. Caller holds the lock.
+     */
+    private void setDeadline(Node node, long deadlineMillis) {
+        if (node.expiresAtMillis != NO_EXPIRY) {
+            expiryIndex.remove(new ExpiryKey(node.expiresAtMillis, node.key));
+        }
+        node.expiresAtMillis = deadlineMillis;
+        if (deadlineMillis != NO_EXPIRY) {
+            expiryIndex.add(new ExpiryKey(deadlineMillis, node.key));
+        }
     }
 
     /** Saturates instead of overflowing on absurdly large TTLs. */
@@ -194,12 +240,5 @@ public class InMemoryStore implements Store {
         } catch (ArithmeticException overflow) {
             return NO_EXPIRY;
         }
-    }
-
-    private static <T> T requireNonNull(T arg, String name) {
-        if (arg == null) {
-            throw new NullPointerException(name + " must not be null");
-        }
-        return arg;
     }
 }

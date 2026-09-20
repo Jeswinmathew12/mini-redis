@@ -50,7 +50,7 @@ CommandParser ───── text ──► validated Command (no sockets)
 CommandExecutor ─── Command ──► reply string (no sockets)
     │
     ▼
-Store ───────────── ConcurrentHashMap of Entry(value, expiresAt)
+Store ───────────── HashMap + expiry index, guarded by one lock
     ▲
     │
 ExpirationSweeper ─ daemon thread reclaiming expired keys
@@ -61,21 +61,26 @@ execution are unit-testable without opening a port.
 
 ### Design notes
 
-- **Value and TTL live in one immutable `Entry`.** Holding them in two
-  parallel maps would make `SET` a two-step update that a reader could
-  observe half-finished.
+- **One lock guards the whole store.** The key map and the expiry index are
+  plain collections touched only under a single `ReentrantLock`, so every
+  operation, including the background sweeper, is atomic with respect to
+  every other. "Is it expired? then remove it" can never race with a
+  concurrent write, which removes a whole class of check-then-act bugs. The
+  cost is that reads don't run in parallel; operations are O(1) or O(log n)
+  and network I/O dominates. It is also the shape LRU needs, since a read
+  must reorder shared recency state.
+- **Value and TTL live in one node**, so `SET` replaces both under the lock
+  and no reader can see a value with the wrong TTL.
 - **Expired keys are reclaimed two ways:** lazily when an operation touches
   one, and actively by a background sweeper. Lazy alone would leak keys that
   nobody ever reads again.
-- **The sweeper is deliberately cheap.** Each pass examines at most 20
-  entries and resumes where the last pass stopped. If a pass finds ≥25%
-  expired it runs again immediately; otherwise it sleeps. An idle server
-  uses effectively no CPU.
-- **Reclamation re-checks expiry atomically on the current entry**
-  (`computeIfPresent`), never a bare `remove(key)`. Otherwise a thread that
-  observed an expired entry can delete a value another thread wrote a moment
-  later. It deliberately does not compare against the entry it saw earlier,
-  so it stays correct if `Entry` gains fields.
+- **The sweeper reads a deadline-ordered index.** Keys with a TTL are also
+  listed in a `TreeSet` ordered by deadline (one entry per key, removed
+  eagerly when the TTL changes). Each pass pops at most 20 expired entries
+  from the front, so its cost is proportional to what expired and it never
+  scans live keys, however many there are. If a pass uses at least 25% of
+  its budget it runs again immediately; otherwise it sleeps, so an idle
+  server uses effectively no CPU.
 - **Input is bounded.** A command line may be at most 1 MiB (configurable on
   `Server`). A longer line gets `ERR line too long` and the connection is
   closed, so one client cannot exhaust the server's memory.

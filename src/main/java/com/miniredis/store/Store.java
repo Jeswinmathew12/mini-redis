@@ -9,6 +9,32 @@ import java.util.Optional;
  *
  * Keys may carry a time-to-live. An expired key behaves exactly as if it
  * were absent, whether or not it has physically been removed yet.
+ *
+ * <h2>Capacity and LRU eviction (contract; not implemented yet)</h2>
+ *
+ * A store may be configured with a maximum number of keys. Without one it is
+ * unbounded. With one, these rules apply:
+ *
+ * <ul>
+ *   <li><b>What counts as a use.</b> A {@code get} that finds a live key and
+ *       a {@code set} (create or overwrite) mark that key most recently used.
+ *       {@code del}, {@code exists}, {@code expire} and a {@code get} miss do
+ *       not change recency.</li>
+ *   <li><b>Capacity is a key count.</b> Entries that have expired but not yet
+ *       been reclaimed still occupy a slot until they are reclaimed.</li>
+ *   <li><b>Overwriting never evicts.</b> A {@code set} on a key that is
+ *       already stored does not grow the store, so nothing is removed.</li>
+ *   <li><b>Making room.</b> A {@code set} of a new key into a full store first
+ *       reclaims expired entries; only if it is still full does it evict the
+ *       least recently used live key. The new key is always stored.</li>
+ *   <li><b>Evicted means absent.</b> An evicted key behaves exactly like a key
+ *       that was never set: {@code get} is empty, {@code del} is false.
+ *       Eviction and expiry are counted separately.</li>
+ *   <li><b>{@code expire} with a non-positive TTL is a delete</b>, not an
+ *       eviction.</li>
+ *   <li><b>Recency is a total order</b> given by the order in which operations
+ *       take effect, so which key is evicted is deterministic.</li>
+ * </ul>
  */
 public interface Store {
 

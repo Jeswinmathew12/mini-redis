@@ -3,18 +3,19 @@ package com.miniredis.store;
 /**
  * Daemon thread that reclaims expired keys nobody has touched.
  *
- * <p>Pacing follows Redis's adaptive cycle. Each pass examines a bounded
- * number of entries, so a large keyspace never causes a long stall. If a
- * pass finds plenty of expired keys the next pass runs immediately, on the
- * assumption more garbage is waiting; otherwise the thread sleeps, so an
- * idle server burns effectively no CPU.
+ * <p>Each pass reclaims at most a bounded number of expired entries, taken
+ * from the front of the store's deadline-ordered index, so the lock is never
+ * held long and live keys are never scanned. If a pass finds plenty of
+ * expired keys the next pass runs immediately, on the assumption more garbage
+ * is waiting; otherwise the thread sleeps, so an idle server burns
+ * effectively no CPU.
  */
 public class ExpirationSweeper implements AutoCloseable {
 
-    /** Entries examined per pass. Small enough that one pass is never slow. */
+    /** Most entries reclaimed per pass. Small enough that one pass is never slow. */
     static final int KEYS_PER_CYCLE = 20;
 
-    /** Re-run immediately when this fraction of a sample was expired. */
+    /** Re-run immediately when a pass used at least this fraction of its budget. */
     private static final double BUSY_THRESHOLD = 0.25;
 
     private final InMemoryStore store;

@@ -164,23 +164,27 @@ class ExpirationTest {
 
     // Reclaiming must never destroy a value written after the expiry was observed
 
+    // A write that lands while an expired key is being read must never be lost.
+    // The store's single lock makes that interleaving impossible across
+    // threads; the hook re-enters on the same thread to keep guarding the
+    // invariant if the locking strategy ever changes.
+
     @Test
-    void getDoesNotReclaimAValueWrittenAfterItObservedExpiry() {
+    void getNeverLosesAValueWrittenWhileItWasReadingAnExpiredKey() {
         HookedClock hooked = new HookedClock(clock);
         InMemoryStore s = new InMemoryStore(hooked);
         s.set("k", "stale");
         s.expire("k", 5);
         clock.advanceSeconds(10);
 
-        // The SET lands after get() has seen the expired entry, before it reclaims.
         hooked.onNextRead(() -> s.set("k", "fresh"));
+        s.get("k");
 
-        assertEquals(Optional.empty(), s.get("k"), "the read itself saw the expired entry");
-        assertEquals(Optional.of("fresh"), s.get("k"), "the newer SET must survive the reclaim");
+        assertEquals(Optional.of("fresh"), s.get("k"), "the newer SET must survive");
     }
 
     @Test
-    void existsDoesNotReclaimAValueWrittenAfterItObservedExpiry() {
+    void existsNeverLosesAValueWrittenWhileItWasReadingAnExpiredKey() {
         HookedClock hooked = new HookedClock(clock);
         InMemoryStore s = new InMemoryStore(hooked);
         s.set("k", "stale");
@@ -188,9 +192,9 @@ class ExpirationTest {
         clock.advanceSeconds(10);
 
         hooked.onNextRead(() -> s.set("k", "fresh"));
+        s.exists("k");
 
-        assertFalse(s.exists("k"));
-        assertEquals(Optional.of("fresh"), s.get("k"));
+        assertEquals(Optional.of("fresh"), s.get("k"), "the newer SET must survive");
     }
 
     @Test
@@ -248,6 +252,93 @@ class ExpirationTest {
 
         assertEquals(Optional.of("v"), store.get("live"));
         assertEquals(1, store.physicalSize());
+    }
+
+    // Expiry index bookkeeping
+
+    @Test
+    void expiryIndexHoldsExactlyOneEntryPerKeyWithATtl() {
+        store.set("a", "1");
+        store.set("b", "2");
+        assertEquals(0, store.expiryIndexSize());
+
+        store.expire("a", 10);
+        store.expire("b", 10);
+        assertEquals(2, store.expiryIndexSize());
+    }
+
+    @Test
+    void repeatedExpireOnOneKeyDoesNotAccumulateIndexEntries() {
+        store.set("k", "v");
+        for (int i = 1; i <= 1_000; i++) {
+            store.expire("k", 100 + i);
+        }
+
+        assertEquals(1, store.expiryIndexSize());
+    }
+
+    @Test
+    void setDelAndReclaimAllRemoveTheIndexEntry() {
+        store.set("viaSet", "v");
+        store.expire("viaSet", 10);
+        store.set("viaSet", "v2");
+        assertEquals(0, store.expiryIndexSize(), "SET clears the TTL");
+
+        store.set("viaDel", "v");
+        store.expire("viaDel", 10);
+        store.del("viaDel");
+        assertEquals(0, store.expiryIndexSize(), "DEL drops the TTL");
+
+        store.set("viaGet", "v");
+        store.expire("viaGet", 5);
+        clock.advanceSeconds(10);
+        store.get("viaGet");
+        assertEquals(0, store.expiryIndexSize(), "lazy reclaim drops the TTL");
+
+        store.set("viaSweep", "v");
+        store.expire("viaSweep", 5);
+        clock.advanceSeconds(10);
+        store.sweepExpired(20);
+        assertEquals(0, store.expiryIndexSize(), "the sweeper drops the TTL");
+    }
+
+    @Test
+    void sweepRemovesEarliestDeadlinesFirstAndHonoursItsBudget() {
+        store.set("late", "v");
+        store.set("early", "v");
+        store.set("middle", "v");
+        store.expire("late", 30);
+        store.expire("early", 10);
+        store.expire("middle", 20);
+        clock.advanceSeconds(25); // early and middle are expired; late is not
+
+        assertEquals(1, store.sweepExpired(1), "budget of 1 removes exactly one");
+        assertEquals(2, store.physicalSize());
+
+        // A lazy read only shrinks the store if the key was still physically
+        // present, so this shows which key the sweep took.
+        store.get("early");
+        assertEquals(2, store.physicalSize(), "the earliest deadline was swept first");
+        store.get("middle");
+        assertEquals(1, store.physicalSize(), "middle was still there to reclaim");
+
+        assertEquals(0, store.sweepExpired(20), "late has not expired");
+        assertEquals(Optional.of("v"), store.get("late"));
+    }
+
+    @Test
+    void sweepCostDoesNotDependOnHowManyLiveKeysExist() {
+        for (int i = 0; i < 100_000; i++) {
+            store.set("live" + i, "v");
+        }
+        store.set("doomed", "v");
+        store.expire("doomed", 5);
+        clock.advanceSeconds(10);
+
+        // A scan-based sweeper would need thousands of passes to reach the one
+        // expired key among 100k; the index finds it in a single pass.
+        assertEquals(1, store.sweepExpired(20));
+        assertEquals(100_000, store.physicalSize());
     }
 
     @Test
