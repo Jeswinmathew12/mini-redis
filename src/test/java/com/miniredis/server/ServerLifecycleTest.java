@@ -8,6 +8,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
@@ -28,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ServerLifecycleTest {
 
     private static final int READ_TIMEOUT_MILLIS = 3_000;
+    private static final int CONNECT_TIMEOUT_MILLIS = 300;
 
     private static Server startServer(InMemoryStore store, Server.Options options) throws IOException {
         Server server = new Server(0, store, options);
@@ -166,11 +168,12 @@ class ServerLifecycleTest {
             Thread t = new Thread(() -> {
                 while (keepConnecting.get()) {
                     try {
-                        Socket socket = new Socket("127.0.0.1", port);
+                        Socket socket = new Socket();
+                        socket.connect(new InetSocketAddress("127.0.0.1", port), CONNECT_TIMEOUT_MILLIS);
                         socket.setSoTimeout(READ_TIMEOUT_MILLIS);
                         connected.add(socket);
                     } catch (IOException refused) {
-                        return; // the server is gone
+                        return; // the server is gone, or the backlog was full for a moment
                     }
                 }
             });
@@ -179,7 +182,11 @@ class ServerLifecycleTest {
         }
 
         Thread.sleep(5);
+        long stopStart = System.nanoTime();
         server.stop();
+        long stopMillis = (System.nanoTime() - stopStart) / 1_000_000;
+        assertTrue(stopMillis < 2_000,
+                "stop() took " + stopMillis + " ms under connection load; it should not have to wait out its timeouts");
         keepConnecting.set(false);
         for (Thread t : connectors) {
             t.join();
@@ -188,16 +195,24 @@ class ServerLifecycleTest {
         assertEquals(0, server.activeClientCount(), "clients still tracked after stop");
         assertFalse(server.isAcceptLoopAlive());
 
-        // Every connection that got through must now be closed by the server.
-        // A socket the server accepted but forgot to close would just sit open
-        // and hit the read timeout.
+        // No connection may still be served. Reading alone is not enough: on
+        // Linux, a client whose handshake finishes just as the listener closes
+        // can be dropped by the kernel without a word, and a client that only
+        // reads then waits forever even though the server did nothing wrong.
+        // Sending a line settles it. A dropped connection is answered with a
+        // reset, and a properly closed one gives EOF or a reset. Only a
+        // connection the server accepted and left open either replies (its
+        // handler is still running) or stays silent until the timeout.
         for (Socket socket : connected) {
             try {
-                assertEquals(-1, socket.getInputStream().read(), "expected EOF");
+                socket.getOutputStream().write("GET k\r\n".getBytes(StandardCharsets.UTF_8));
+                socket.getOutputStream().flush();
+                int first = socket.getInputStream().read();
+                assertEquals(-1, first, "a connection was still being served after stop()");
             } catch (SocketTimeoutException leaked) {
                 throw new AssertionError("server leaked an accepted connection", leaked);
             } catch (IOException reset) {
-                // reset by the server side: also fine
+                // reset or broken pipe: the server side is gone, which is what we want
             } finally {
                 socket.close();
             }
