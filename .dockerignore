@@ -1,0 +1,13 @@
+# Keep the build context small and the layer cache stable.
+target/
+.git/
+.gitignore
+.idea/
+*.iml
+.vscode/
+.claude/
+.DS_Store
+Thumbs.db
+Dockerfile
+.dockerignore
+README.md

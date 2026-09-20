@@ -163,6 +163,24 @@ cmd "SET name Jeswin"
 cmd "GET name"
 ```
 
+## Docker
+
+```bash
+docker build -t mini-redis .
+docker run --rm -p 127.0.0.1:6380:6380 mini-redis                       # no key limit
+docker run --rm -p 127.0.0.1:6380:6380 mini-redis 6380 100000 0.0.0.0   # LRU, 100k keys
+docker stop <container>                                                 # SIGTERM: clean shutdown
+```
+
+The image is a two-stage build (Maven + JDK to compile, JRE only to run),
+runs as a non-root user, and has a health check that sends `DBSIZE` over TCP.
+Container arguments are the same `[port [maxKeys [bindAddress]]]` as above;
+the default is `6380 0 0.0.0.0`. The bind address must stay `0.0.0.0` inside a
+container. Because the server has no authentication, publish the port on the
+host's loopback (`-p 127.0.0.1:6380:6380`) unless you mean to expose it.
+Logs go to stderr, so `docker logs` shows them. The health check assumes port
+6380; if you change the port, change it in the `Dockerfile` too.
+
 ## Tests
 
 ```bash
@@ -191,7 +209,6 @@ src/test/java/com/miniredis/
 
 ## Not yet implemented
 
-- Docker
 - GitHub Actions CI
 
 Persistence is deliberately out of scope: this is a cache-style store, like
