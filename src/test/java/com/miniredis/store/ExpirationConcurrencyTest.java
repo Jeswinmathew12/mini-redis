@@ -115,7 +115,7 @@ class ExpirationConcurrencyTest {
     void concurrentExpireAndSetNeverResurrectAStaleValue() throws Exception {
         Set<String> observed = ConcurrentHashMap.newKeySet();
 
-        for (int round = 0; round < 500; round++) {
+        for (int round = 0; round < 2_000; round++) {
             store.set("k", "stale");
             CyclicBarrier gate = new CyclicBarrier(2);
 
@@ -133,13 +133,15 @@ class ExpirationConcurrencyTest {
             expirer.join();
             setter.join();
 
-            clock.advanceSeconds(5);
-            store.get("k").ifPresent(observed::add);
+            // Read BEFORE moving the clock. Either order of the two operations
+            // leaves a live "fresh" (SET last: no TTL; EXPIRE last: 1s TTL, not
+            // yet elapsed). Only a lost update leaves "stale" or nothing. Moving
+            // the clock first would expire the TTL'd outcome and hide that bug.
+            observed.add(store.get("k").orElse("<missing>"));
         }
 
-        // "stale" must never survive: every round overwrote it before the clock moved.
-        assertTrue(observed.stream().allMatch("fresh"::equals),
-                "a stale value survived a concurrent SET: " + observed);
+        assertEquals(Set.of("fresh"), observed,
+                "EXPIRE and a concurrent SET must never lose the SET's value");
     }
 
     @Test
