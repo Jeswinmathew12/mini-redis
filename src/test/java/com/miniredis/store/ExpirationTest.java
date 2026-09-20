@@ -162,6 +162,48 @@ class ExpirationTest {
         assertThrows(NullPointerException.class, () -> store.expire(null, 10));
     }
 
+    // Reclaiming must never destroy a value written after the expiry was observed
+
+    @Test
+    void getDoesNotReclaimAValueWrittenAfterItObservedExpiry() {
+        HookedClock hooked = new HookedClock(clock);
+        InMemoryStore s = new InMemoryStore(hooked);
+        s.set("k", "stale");
+        s.expire("k", 5);
+        clock.advanceSeconds(10);
+
+        // The SET lands after get() has seen the expired entry, before it reclaims.
+        hooked.onNextRead(() -> s.set("k", "fresh"));
+
+        assertEquals(Optional.empty(), s.get("k"), "the read itself saw the expired entry");
+        assertEquals(Optional.of("fresh"), s.get("k"), "the newer SET must survive the reclaim");
+    }
+
+    @Test
+    void existsDoesNotReclaimAValueWrittenAfterItObservedExpiry() {
+        HookedClock hooked = new HookedClock(clock);
+        InMemoryStore s = new InMemoryStore(hooked);
+        s.set("k", "stale");
+        s.expire("k", 5);
+        clock.advanceSeconds(10);
+
+        hooked.onNextRead(() -> s.set("k", "fresh"));
+
+        assertFalse(s.exists("k"));
+        assertEquals(Optional.of("fresh"), s.get("k"));
+    }
+
+    @Test
+    void reclaimStillRemovesAnEntryThatIsGenuinelyExpired() {
+        store.set("k", "v");
+        store.expire("k", 5);
+        clock.advanceSeconds(10);
+
+        store.get("k");
+
+        assertEquals(0, store.physicalSize());
+    }
+
     // Memory reclamation
 
     @Test

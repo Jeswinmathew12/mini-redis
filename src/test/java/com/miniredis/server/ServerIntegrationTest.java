@@ -35,8 +35,8 @@ class ServerIntegrationTest {
 
     private class TestClient implements AutoCloseable {
         private final Socket socket;
-        private final BufferedReader in;
-        private final PrintWriter out;
+        final BufferedReader in;
+        final PrintWriter out;
 
         TestClient() throws IOException {
             socket = new Socket("localhost", server.getPort());
@@ -126,6 +126,44 @@ class ServerIntegrationTest {
             rude.close();
 
             assertEquals("OK", healthy.send("SET ok 1"));
+        }
+    }
+
+    @Test
+    void oversizedLineIsRejectedAndThatClientIsDisconnected() throws Exception {
+        server.stop();
+        server = new Server(0, new InMemoryStore(), 64);
+        server.start();
+
+        try (TestClient healthy = new TestClient(); TestClient abusive = new TestClient()) {
+            assertEquals("OK", abusive.send("SET small ok"));
+
+            abusive.out.print("SET big " + "x".repeat(500) + "\r\n");
+            abusive.out.flush();
+            assertEquals("ERR line too long", abusive.in.readLine());
+            assertNull(abusive.in.readLine(), "server should close the connection");
+
+            assertEquals("OK", healthy.send("SET other 1"));
+            assertEquals("ok", healthy.send("GET small"));
+        }
+    }
+
+    @Test
+    void unterminatedFloodIsCutOffWithoutBufferingIt() throws Exception {
+        server.stop();
+        server = new Server(0, new InMemoryStore(), 1024);
+        server.start();
+
+        try (Socket flood = new Socket("localhost", server.getPort());
+             TestClient healthy = new TestClient()) {
+            flood.getOutputStream().write("x".repeat(5_000).getBytes(StandardCharsets.UTF_8));
+            flood.getOutputStream().flush();
+
+            BufferedReader reply = new BufferedReader(
+                    new InputStreamReader(flood.getInputStream(), StandardCharsets.UTF_8));
+            assertEquals("ERR line too long", reply.readLine());
+
+            assertEquals("OK", healthy.send("SET still works"));
         }
     }
 

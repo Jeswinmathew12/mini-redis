@@ -17,7 +17,11 @@ import java.util.concurrent.Executors;
  */
 public class Server {
 
+    /** Longest command line a client may send, in bytes. */
+    public static final int DEFAULT_MAX_LINE_BYTES = 1024 * 1024;
+
     private final int requestedPort;
+    private final int maxLineBytes;
     private final CommandParser parser = new CommandParser();
     private final CommandExecutor executor;
     private final ExecutorService clientThreads = Executors.newCachedThreadPool();
@@ -27,7 +31,16 @@ public class Server {
 
     /** @param port port to listen on; 0 picks any free port (useful in tests) */
     public Server(int port, Store store) {
+        this(port, store, DEFAULT_MAX_LINE_BYTES);
+    }
+
+    /** @param maxLineBytes clients sending a longer line get an error and are disconnected */
+    public Server(int port, Store store, int maxLineBytes) {
+        if (maxLineBytes <= 0) {
+            throw new IllegalArgumentException("maxLineBytes must be positive");
+        }
         this.requestedPort = port;
+        this.maxLineBytes = maxLineBytes;
         this.executor = new CommandExecutor(store);
     }
 
@@ -73,7 +86,7 @@ public class Server {
                 openClients.add(client);
                 clientThreads.execute(() -> {
                     try {
-                        new ClientHandler(client, parser, executor).run();
+                        new ClientHandler(client, parser, executor, maxLineBytes).run();
                     } finally {
                         openClients.remove(client);
                     }

@@ -68,8 +68,9 @@ public class InMemoryStore implements Store {
         if (entry == null) {
             return Optional.empty();
         }
-        if (entry.isExpiredAt(clock.millis())) {
-            dropIfUnchanged(key, entry);
+        long now = clock.millis();
+        if (entry.isExpiredAt(now)) {
+            reclaimIfExpired(key, now);
             return Optional.empty();
         }
         return Optional.of(entry.value());
@@ -90,8 +91,9 @@ public class InMemoryStore implements Store {
         if (entry == null) {
             return false;
         }
-        if (entry.isExpiredAt(clock.millis())) {
-            dropIfUnchanged(key, entry);
+        long now = clock.millis();
+        if (entry.isExpiredAt(now)) {
+            reclaimIfExpired(key, now);
             return false;
         }
         return true;
@@ -147,7 +149,7 @@ public class InMemoryStore implements Store {
 
                 Map.Entry<String, Entry> candidate = sweepCursor.next();
                 if (candidate.getValue().isExpiredAt(now)
-                        && dropIfUnchanged(candidate.getKey(), candidate.getValue())) {
+                        && reclaimIfExpired(candidate.getKey(), now)) {
                     removed++;
                 }
             }
@@ -161,11 +163,28 @@ public class InMemoryStore implements Store {
     }
 
     /**
-     * Removes the key only if it still maps to {@code expected}. Guards
-     * against deleting a value another thread wrote after we read ours.
+     * Removes the key only if whatever it maps to <em>right now</em> is
+     * expired at {@code nowMillis}. The check runs atomically on the current
+     * entry, so a value another thread wrote after we last looked survives
+     * unless it is itself expired. This deliberately does not compare against
+     * the entry we saw earlier: that would depend on {@code Entry.equals}
+     * and break silently if {@code Entry} ever gains fields.
+     *
+     * <p>The clock is read by the caller, never inside the lambda, so the
+     * lambda cannot re-enter the map.
+     *
+     * @return true if an entry was removed
      */
-    private boolean dropIfUnchanged(String key, Entry expected) {
-        return data.remove(key, expected);
+    private boolean reclaimIfExpired(String key, long nowMillis) {
+        boolean[] removed = new boolean[1];
+        data.computeIfPresent(key, (k, current) -> {
+            if (current.isExpiredAt(nowMillis)) {
+                removed[0] = true;
+                return null;
+            }
+            return current;
+        });
+        return removed[0];
     }
 
     /** Saturates instead of overflowing on absurdly large TTLs. */

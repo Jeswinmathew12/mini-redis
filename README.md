@@ -17,7 +17,8 @@ so you can drive it with `telnet` or `netcat`.
 | `EXPIRE key seconds` | `OK` / `(nil)` | `(nil)` if the key is absent. A non-positive TTL deletes immediately. |
 
 Command names are case-insensitive; keys and values are not. A malformed
-command returns `ERR <reason>` and leaves the connection open.
+command returns `ERR <reason>` and leaves the connection open. Lines end at
+`\n` (a preceding `\r` is dropped); a lone `\r` is not a line break.
 
 ```
 SET session123 Jeswin
@@ -70,9 +71,14 @@ execution are unit-testable without opening a port.
   entries and resumes where the last pass stopped. If a pass finds ≥25%
   expired it runs again immediately; otherwise it sleeps. An idle server
   uses effectively no CPU.
-- **Reclamation uses compare-and-remove** (`remove(key, entry)`), never a
-  bare `remove(key)`. Otherwise a thread that observed an expired entry can
-  delete a value another thread wrote a moment later.
+- **Reclamation re-checks expiry atomically on the current entry**
+  (`computeIfPresent`), never a bare `remove(key)`. Otherwise a thread that
+  observed an expired entry can delete a value another thread wrote a moment
+  later. It deliberately does not compare against the entry it saw earlier,
+  so it stays correct if `Entry` gains fields.
+- **Input is bounded.** A command line may be at most 1 MiB (configurable on
+  `Server`). A longer line gets `ERR line too long` and the connection is
+  closed, so one client cannot exhaust the server's memory.
 
 ## Requirements
 
